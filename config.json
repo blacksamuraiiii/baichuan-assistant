@@ -1,0 +1,50 @@
+{
+  "version": "1.0.0",
+  "tasks": [
+    {
+      "name": "终端升级清单测试",
+      "api_config": {
+        "url": "http://sjgxpt.telecomjs.com:8090/dataway/api/zd_reporter/common/wod/dzxp/ZDSJQD",
+        "headers": {
+          "appKey": "bb7b0ad236c26563",
+          "appSecret": "1b1f3974bb7b0ad236c26563c783f989"
+        },
+        "timeout": 30,
+        "verify_ssl": true,
+        "proxy": null
+      },
+      "data_config": {
+        "required_fields": [],
+        "preview_rows": 10,
+        "filename_pattern": "{taskName}_{date}.xlsx"
+      },
+      "email_config": {
+        "sender": {
+          "email": "",
+          "password": ""
+        },
+        "recipients": {
+          "to": [],
+          "cc": [],
+          "bcc": []
+        },
+        "subject": "数据报表 - {date}",
+        "body": "<p>您好，附件是 {taskName} 的数据报表，请查收。</p>",
+        "attachment_name": "{taskName}_{date}.xlsx"
+      },
+      "schedule_config": {
+        "enabled": true,
+        "time": "08:00",
+        "frequency": "DAILY"
+      },
+      "status": "active"
+    }
+  ],
+  "settings": {
+    "default_smtp_server": "smtp.chinatelecom.cn",
+    "default_smtp_port": 465,
+    "default_timeout": 30,
+    "retry_attempts": 3,
+    "retry_delay": 5
+  }
+}
