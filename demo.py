@@ -107,3 +107,16 @@ if __name__ == '__main__':
     
     # 打印数据
     print(df.head(1))
+
+    # 保存数据
+    df.to_excel("demo.xlsx", index=False)
+    
+    # 发送邮件
+    receiver_emails = "huangweishen.js@chinatelecom.cn"
+    cc_emails = ""
+    subject = "终端升级清单"
+    body_content = "终端升级清单"
+    attachment_path = "demo.xlsx"
+    sender_email = "huangweishen.js@chinatelecom.cn"
+    sender_password =""
+    send_email(receiver_emails, cc_emails, subject, body_content, attachment_path, sender_email, sender_password)

@@ -3,20 +3,99 @@
   "tasks": [
     {
       "name": "终端升级清单测试",
-      "api_config": {
-        "url": "http://sjgxpt.telecomjs.com:8090/dataway/api/zd_reporter/common/wod/dzxp/ZDSJQD",
-        "headers": {
-          "appKey": "bb7b0ad236c26563",
-          "appSecret": "1b1f3974bb7b0ad236c26563c783f989"
-        },
-        "timeout": 30,
-        "verify_ssl": true,
-        "proxy": null
-      },
+      "api_configs": [
+        {
+          "name": "API1",
+          "url": "http://sjgxpt.telecomjs.com:8090/dataway/api/zd_reporter/common/wod/dzxp/ZDSJQD",
+          "headers": {
+            "appKey": "bb7b0ad236c26563",
+            "appSecret": "1b1f3974bb7b0ad236c26563c783f989"
+          },
+          "timeout": 30,
+          "verify_ssl": true,
+          "proxy": null
+        }
+      ],
       "data_config": {
         "required_fields": [],
         "preview_rows": 10,
-        "filename_pattern": "{taskName}_{date}.xlsx"
+        "filename_pattern": "{taskName}_{date}.xlsx",
+        "sheet_names": [
+          "Sheet1"
+        ]
+      },
+      "email_config": {
+        "sender": {
+          "email": "",
+          "password": ""
+        },
+        "recipients": {
+          "to": [],
+          "cc": [],
+          "bcc": []
+        },
+        "subject": "数据报表 - {date}",
+        "body": "<p>您好，附件是 {taskName} 的数据报表，请查收。</p>\n<p>数据表：</p>\n<p>{Sheet1}</p>",
+        "attachment_name": "{taskName}_{date}.xlsx"
+      },
+      "schedule_config": {
+        "enabled": false,
+        "time": "08:00",
+        "frequency": "DAILY"
+      },
+      "status": "active",
+      "recipients": {
+        "to": [],
+        "cc": [],
+        "bcc": []
+      }
+    },
+    {
+      "name": "多API任务测试",
+      "api_configs": [
+        {
+          "name": "API1",
+          "url": "https://api.example.com/data1",
+          "headers": {
+            "appKey": "test_key_1",
+            "appSecret": "test_secret_1"
+          },
+          "timeout": 30,
+          "verify_ssl": true,
+          "proxy": null
+        },
+        {
+          "name": "API2",
+          "url": "https://api.example.com/data2",
+          "headers": {
+            "appKey": "test_key_2",
+            "appSecret": "test_secret_2"
+          },
+          "timeout": 30,
+          "verify_ssl": true,
+          "proxy": null
+        },
+        {
+          "name": "API3",
+          "url": "https://api.example.com/data3",
+          "headers": {
+            "appKey": "test_key_3",
+            "appSecret": "test_secret_3"
+          },
+          "timeout": 30,
+          "verify_ssl": true,
+          "proxy": null
+        }
+      ],
+      "data_config": {
+        "required_fields": [],
+        "preview_rows": 10,
+        "filename_pattern": "{taskName}_{date}.xlsx",
+        "sheet_names": [
+          "销售数据",
+          "库存数据",
+          "客户数据"
+        ]
       },
       "email_config": {
         "sender": {
@@ -33,11 +112,16 @@
         "attachment_name": "{taskName}_{date}.xlsx"
       },
       "schedule_config": {
-        "enabled": true,
-        "time": "08:00",
+        "enabled": false,
+        "time": "18:00",
         "frequency": "DAILY"
       },
-      "status": "active"
+      "status": "active",
+      "recipients": {
+        "to": [],
+        "cc": [],
+        "bcc": []
+      }
     }
   ],
   "settings": {

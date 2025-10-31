@@ -7,7 +7,9 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        # 移除config.json的暴露，改为嵌入式配置
+        # 将config.json、secret.key打包进exe
+        ('config.json', '.'),
+        ('secret.key', '.'),
     ],
     hiddenimports=['customtkinter', 'pandas', 'openpyxl', 'tkinter', 'requests', 'cryptography', 'CTkMessagebox', 'numpy'],
     hookspath=[],
