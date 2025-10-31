@@ -89,7 +89,3 @@ python app.py --register-task "你的任务名称"
 # 注销一个已注册的定时任务
 python app.py --unregister-task "你的任务名称"
 ```
-
-### 技术支持
-
-如遇问题，请将 `app.log` 文件发送给开发人员 **黄维申** (`huangweishen.js@chinatelecom.cn`)。
