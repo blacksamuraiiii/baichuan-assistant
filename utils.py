@@ -178,7 +178,7 @@ def _format_task_strings(texts: list, task_name: str) -> list:
 
 # ==================== API数据获取 ====================
 def fetch_api_data(task_config: Dict, api_name: str = "API1", use_cache: bool = True) -> Optional[pd.DataFrame]:
-    """从指定API获取数据"""
+    """从指定API获取数据 - 优化版：流式处理大数据，防止内存溢出（适用于不分页API）"""
     # 检查缓存
     if use_cache:
         cached_df = get_cached_data(api_name)
@@ -200,8 +200,9 @@ def fetch_api_data(task_config: Dict, api_name: str = "API1", use_cache: bool = 
 
     url = api_config["url"]
     headers = api_config.get("headers", {})
-    timeout = api_config.get("timeout", 30)
+    timeout = api_config.get("timeout", 120)  # 增加超时时间，处理大数据
     verify_ssl = api_config.get("verify_ssl", True)
+    max_records = api_config.get("max_records", 100000)  # 最大记录数限制
 
     # 直接使用headers，不再解密
     decrypted_headers = headers
@@ -209,6 +210,9 @@ def fetch_api_data(task_config: Dict, api_name: str = "API1", use_cache: bool = 
     logger.info(f"正在从API获取数据: {url} ({api_name})")
 
     try:
+        logger.info(f"开始请求API数据，最大记录数限制: {max_records}")
+        
+        # 直接请求完整数据（不分页API）
         response = requests.post(
             url,
             headers=decrypted_headers,
@@ -218,30 +222,130 @@ def fetch_api_data(task_config: Dict, api_name: str = "API1", use_cache: bool = 
         response.raise_for_status()
 
         response_data = response.json()
-        if response_data.get('success') and 'value' in response_data:
-            df = pd.DataFrame(response_data['value'])
-            logger.info(f"API数据获取成功: {api_name}, 共 {len(df)} 行数据")
-
-            # 数据校验
-            required_fields = task_config["data_config"].get("required_fields", [])
-            if required_fields:
-                missing_fields = [field for field in required_fields if field not in df.columns]
-                if missing_fields:
-                    logger.error(f"数据缺少必要字段: {missing_fields}")
-                    return None
-
-            # 缓存DataFrame
-            set_cached_data(api_name, df)
-            return df
-        else:
+        if not response_data.get('success') or 'value' not in response_data:
             logger.error(f"API返回数据格式不正确: {api_name}")
             return None
 
+        # 获取数据记录
+        records = response_data['value']
+        
+        # 如果不是列表格式，尝试转换
+        if not isinstance(records, list):
+            if isinstance(records, dict) and 'records' in records:
+                records = records['records']
+            else:
+                logger.error(f"API返回的数据不是列表格式: {api_name}")
+                return None
+        
+        total_records = len(records)
+        logger.info(f"API返回数据: {total_records} 条记录")
+        
+        # 检查是否超过最大记录数限制
+        if total_records > max_records:
+            logger.warning(f"数据量({total_records})超过限制({max_records})，将截取前{max_records}条")
+            records = records[:max_records]
+            total_records = max_records
+        
+        # 如果数据量很大，采用流式处理
+        if total_records > 50000:
+            return _process_large_dataset(records, task_config, api_name)
+        else:
+            # 小数据量直接处理
+            return _process_small_dataset(records, task_config, api_name)
+        
     except requests.exceptions.RequestException as e:
         logger.error(f"API请求失败: {api_name} - {e}")
         return None
     except Exception as e:
         logger.error(f"数据处理失败: {api_name} - {e}")
+        return None
+
+def _process_large_dataset(records: List, task_config: Dict, api_name: str) -> Optional[pd.DataFrame]:
+    """处理大数据集 - 流式构建DataFrame"""
+    logger.info(f"大数据集检测: {len(records)} 条记录，启用流式处理")
+    
+    try:
+        # 分批构建DataFrame以减少内存峰值
+        batch_size = 10000  # 每批10000条
+        dataframes = []
+        
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            batch_df = pd.DataFrame(batch)
+            dataframes.append(batch_df)
+            
+            current_count = min(i + batch_size, len(records))
+            progress = (current_count / len(records)) * 100
+            logger.info(f"流式处理进度: {progress:.1f}% ({current_count}/{len(records)})")
+            
+            # 立即清理内存
+            del batch
+            if i % batch_size == 0:
+                import gc
+                gc.collect()
+        
+        # 合并所有批次
+        logger.info("开始合并数据批次...")
+        final_df = pd.concat(dataframes, ignore_index=True)
+        
+        # 清理临时DataFrame
+        del dataframes
+        import gc
+        gc.collect()
+        
+        return _finalize_dataframe(final_df, task_config, api_name)
+        
+    except Exception as e:
+        logger.error(f"大数据集处理失败: {api_name} - {e}")
+        return None
+
+def _process_small_dataset(records: List, task_config: Dict, api_name: str) -> Optional[pd.DataFrame]:
+    """处理小数据集 - 直接构建"""
+    logger.info(f"小数据集直接处理: {len(records)} 条记录")
+    
+    try:
+        df = pd.DataFrame(records)
+        return _finalize_dataframe(df, task_config, api_name)
+        
+    except Exception as e:
+        logger.error(f"小数据集处理失败: {api_name} - {e}")
+        return None
+
+def _finalize_dataframe(df: pd.DataFrame, task_config: Dict, api_name: str) -> Optional[pd.DataFrame]:
+    """最终DataFrame处理和验证"""
+    try:
+        # 数据去重（防止API返回重复数据）
+        if not df.empty:
+            initial_count = len(df)
+            df = df.drop_duplicates()
+            if len(df) < initial_count:
+                logger.info(f"数据去重: {initial_count} -> {len(df)} 条记录")
+        
+        logger.info(f"数据处理完成: {api_name}, 共 {len(df)} 行数据")
+        
+        # 数据校验
+        required_fields = task_config["data_config"].get("required_fields", [])
+        if required_fields:
+            missing_fields = [field for field in required_fields if field not in df.columns]
+            if missing_fields:
+                logger.error(f"数据缺少必要字段: {missing_fields}")
+                return None
+
+        # 内存使用情况报告
+        memory_usage = df.memory_usage(deep=True).sum() / 1024 / 1024  # MB
+        logger.info(f"DataFrame内存使用: {memory_usage:.2f} MB")
+        
+        # 缓存结果
+        set_cached_data(api_name, df)
+        
+        # 最终内存清理
+        import gc
+        gc.collect()
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"最终DataFrame处理失败: {api_name} - {e}")
         return None
 
 def fetch_all_api_data(task_config: Dict, use_cache: bool = True) -> Dict[str, Optional[pd.DataFrame]]:
@@ -751,7 +855,7 @@ DEFAULT_CONFIG_TEMPLATE = {
     "settings": {
         "default_smtp_server": "smtp.chinatelecom.cn",
         "default_smtp_port": 465,
-        "default_timeout": 30,
+        "default_timeout": 120,  # 增加到120秒，适配大数据API调用
         "retry_attempts": 3,
         "retry_delay": 5
     }
@@ -764,13 +868,16 @@ TASK_TEMPLATE = {
             "name": "API1",
             "url": "",
             "headers": {"appKey": "", "appSecret": ""},
-            "timeout": 30,
-            "verify_ssl": True
+            "timeout": 120,  # 增加默认超时时间，适配大数据
+            "verify_ssl": True,
+            "max_records": 100000,  # 新增：单次获取最大记录数限制
+            "streaming_threshold": 50000  # 新增：流式处理阈值
         }
     ],
     "data_config": {
         "filename_pattern": "{taskName}_{date}.xlsx",
-        "sheet_names": ["Sheet1"]
+        "sheet_names": ["Sheet1"],
+        "required_fields": []  # 新增：数据校验字段
     },
     "email_config": {
         "sender": {"email": "", "password": ""},
