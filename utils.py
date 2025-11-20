@@ -182,100 +182,180 @@ def _format_task_strings(texts: list, task_name: str) -> list:
 
     return result
 
+class ChainedStream:
+    """辅助类：用于连接预读取的chunk和原始流"""
+    def __init__(self, first_chunk, stream):
+        self.buffer = first_chunk
+        self.stream = stream
+        
+    def read(self, size=-1):
+        if self.buffer:
+            if size == -1 or size >= len(self.buffer):
+                result = self.buffer
+                self.buffer = b""
+                if size != -1:
+                    # 需要读取更多
+                    remaining = size - len(result)
+                    if remaining > 0:
+                        chunk = self.stream.read(remaining)
+                        if chunk:
+                            result += chunk
+                else:
+                    chunk = self.stream.read()
+                    if chunk:
+                        result += chunk
+                return result
+            else:
+                result = self.buffer[:size]
+                self.buffer = self.buffer[size:]
+                return result
+        return self.stream.read(size)
+
 # ==================== API数据获取 ====================
 def fetch_api_data(task_config: Dict, api_name: str = "API1", use_cache: bool = True) -> Optional[pd.DataFrame]:
     """从指定API获取数据 - 优化版：流式处理大数据，防止内存溢出（适用于不分页API）"""
-    if use_cache and (cached_df := get_cached_data(api_name)) is not None:
-        logger.info(f"使用缓存的DataFrame: {api_name}")
-        return cached_df
+    # 检查缓存
+    if use_cache:
+        cached_df = get_cached_data(api_name)
+        if cached_df is not None:
+            logger.info(f"使用缓存的DataFrame: {api_name}")
+            return cached_df
 
-    api_config = next((c for c in task_config.get("api_configs", []) if c.get("name") == api_name), None)
+    # 获取指定API配置
+    api_configs = task_config.get("api_configs", [])
+    api_config = None
+    for config in api_configs:
+        if config.get("name") == api_name:
+            api_config = config
+            break
+
     if not api_config:
         logger.error(f"未找到API配置: {api_name}")
         return None
 
     url = api_config["url"]
     headers = api_config.get("headers", {})
-    timeout = api_config.get("timeout", 120)
+    timeout = api_config.get("timeout", 120)  # 增加超时时间，处理大数据
     verify_ssl = api_config.get("verify_ssl", True)
-    max_records = api_config.get("max_records", 100000)
+    max_records = api_config.get("max_records", 100000)  # 最大记录数限制
 
-    logger.info(f"正在从API获取数据: {url} ({api_name}), 最大记录数: {max_records}")
+    # 直接使用headers，不再解密
+    decrypted_headers = headers
+
+    logger.info(f"正在从API获取数据: {url} ({api_name})")
 
     try:
-        with requests.post(url, headers=headers, timeout=timeout, verify=verify_ssl, stream=True) as response:
-            response.raise_for_status()
+        logger.info(f"开始请求API数据，最大记录数限制: {max_records}")
+        
+        # 使用流式请求
+        response = requests.post(
+            url,
+            headers=decrypted_headers,
+            timeout=timeout,
+            verify=verify_ssl,
+            stream=True  # 开启流式模式
+        )
+        response.raise_for_status()
+
+        # 预读取一小部分数据以检测结构和错误
+        # requests的raw是urllib3的HTTPResponse，通常支持read
+        first_chunk = response.raw.read(2048)
+        
+        # 检查是否是错误响应（通常错误响应很短且包含 success: false）
+        try:
+            preview = first_chunk.decode('utf-8', errors='ignore')
+            clean_preview = ''.join(preview.split())
             
-            # 动态查找数据记录迭代器
-            records_iter = None
-            # ijson.kvitems可以流式读取顶层键值对
-            for key, value in ijson.kvitems(response.raw, ''):
-                if key == 'success' and not value:
-                    # 提前处理API业务错误
-                    msg = next((v for k, v in ijson.kvitems(response.raw, '') if k == 'message'), '未知错误')
-                    logger.error(f"API返回错误: {msg}")
-                    return None
-                # 假设数据在名为 'value' 或 'data' 的列表或对象中
-                if key in ('value', 'data'):
-                    # 如果value是对象，继续查找'records'
-                    if isinstance(value, dict):
-                        records_iter = ijson.items(ijson.items(response.raw, key), 'records.item')
-                    else:
-                        records_iter = ijson.items(response.raw, f'{key}.item')
-                    break # 找到数据就跳出
-
-            if records_iter is None:
-                 # 如果没有找到 'value' 或 'data'，尝试默认路径
-                logger.warning("未在顶层找到 'value' 或 'data' 键, 尝试 'value.item' 作为默认路径")
-                # 重置流位置是不现实的，因此需要重新请求或有更好的API设计
-                # 这里我们假设API结构是固定的，如果找不到就失败
-                # 为了简化，我们直接认为这种情况无法处理
-                logger.error("无法确定API响应中的数据路径")
+            # 如果看起来像错误响应
+            if '"success":false' in clean_preview or '"success":0' in clean_preview:
+                # 读取剩余部分以便完整解析
+                remaining = response.raw.read()
+                full_content = first_chunk + remaining
+                try:
+                    error_data = json.loads(full_content)
+                    logger.error(f"API返回错误: {error_data.get('message', '未知错误')}")
+                except:
+                    logger.error(f"API返回错误且无法解析: {preview[:200]}...")
                 return None
+                
+        except Exception as e:
+            logger.warning(f"预检查响应失败，继续尝试解析: {e}")
 
-            return _process_stream_dataset(records_iter, task_config, api_name, max_records)
-
+        # 构建链式流
+        stream = ChainedStream(first_chunk, response.raw)
+        
+        # 确定解析路径
+        # 默认假设是 value: [...]
+        prefix = 'value.item'
+        if '"value":{' in clean_preview or '"value":{"records":[' in clean_preview:
+            prefix = 'value.records.item'
+            
+        logger.info(f"使用流式解析，路径: {prefix}")
+        
+        # 创建生成器
+        records_iter = ijson.items(stream, prefix)
+        
+        # 使用流式处理函数
+        return _process_stream_dataset(records_iter, task_config, api_name, max_records)
+        
     except requests.exceptions.RequestException as e:
         logger.error(f"API请求失败: {api_name} - {e}")
+        return None
     except Exception as e:
         logger.error(f"数据处理失败: {api_name} - {e}")
-    
-    return None
-
+        return None
 
 def _process_stream_dataset(records_iter, task_config: Dict, api_name: str, max_records: int) -> Optional[pd.DataFrame]:
     """处理流式数据集 - 分批构建DataFrame"""
     logger.info(f"开始流式处理数据: {api_name}")
     
     try:
-        batch_size = 10000
+        # 分批构建DataFrame以减少内存峰值
+        batch_size = 10000  # 每批10000条
         dataframes = []
         current_batch = []
         total_count = 0
-
+        
         for record in records_iter:
             current_batch.append(record)
             total_count += 1
-
+            
+            # 达到批次大小时处理
             if len(current_batch) >= batch_size:
-                dataframes.append(pd.DataFrame(current_batch))
-                current_batch = []
+                batch_df = pd.DataFrame(current_batch)
+                dataframes.append(batch_df)
+                current_batch = [] # 清空当前批次
+                
                 logger.info(f"已处理数据: {total_count} 条")
-
+                
+                # 立即清理内存
+                import gc
+                gc.collect()
+                
+            # 检查最大记录数限制
             if total_count >= max_records:
                 logger.warning(f"达到最大记录数限制 ({max_records})，停止读取")
                 break
         
+        # 处理剩余数据
         if current_batch:
-            dataframes.append(pd.DataFrame(current_batch))
+            batch_df = pd.DataFrame(current_batch)
+            dataframes.append(batch_df)
             logger.info(f"处理剩余数据，总计: {total_count} 条")
             
         if not dataframes:
             logger.warning(f"未获取到任何数据: {api_name}")
-            return pd.DataFrame() # 返回空的DataFrame而不是None
-
+            return None
+            
+        # 合并所有批次
         logger.info("开始合并数据批次...")
         final_df = pd.concat(dataframes, ignore_index=True)
+        
+        # 清理临时DataFrame
+        del dataframes
+        del current_batch
+        import gc
+        gc.collect()
         
         return _finalize_dataframe(final_df, task_config, api_name)
         
