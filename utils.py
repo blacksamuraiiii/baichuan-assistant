@@ -3,6 +3,11 @@
 工具函数模块 - 将app.py中的工具函数分离出来以减少主文件体积
 """
 
+# -*- coding: utf-8 -*-
+"""
+工具函数模块 - 将app.py中的工具函数分离出来以减少主文件体积
+"""
+
 import os
 import sys
 import time
@@ -10,6 +15,7 @@ import json
 import subprocess
 import pandas as pd
 import requests
+import ijson
 from io import BytesIO
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -179,124 +185,102 @@ def _format_task_strings(texts: list, task_name: str) -> list:
 # ==================== API数据获取 ====================
 def fetch_api_data(task_config: Dict, api_name: str = "API1", use_cache: bool = True) -> Optional[pd.DataFrame]:
     """从指定API获取数据 - 优化版：流式处理大数据，防止内存溢出（适用于不分页API）"""
-    # 检查缓存
-    if use_cache:
-        cached_df = get_cached_data(api_name)
-        if cached_df is not None:
-            logger.info(f"使用缓存的DataFrame: {api_name}")
-            return cached_df
+    if use_cache and (cached_df := get_cached_data(api_name)) is not None:
+        logger.info(f"使用缓存的DataFrame: {api_name}")
+        return cached_df
 
-    # 获取指定API配置
-    api_configs = task_config.get("api_configs", [])
-    api_config = None
-    for config in api_configs:
-        if config.get("name") == api_name:
-            api_config = config
-            break
-
+    api_config = next((c for c in task_config.get("api_configs", []) if c.get("name") == api_name), None)
     if not api_config:
         logger.error(f"未找到API配置: {api_name}")
         return None
 
     url = api_config["url"]
     headers = api_config.get("headers", {})
-    timeout = api_config.get("timeout", 120)  # 增加超时时间，处理大数据
+    timeout = api_config.get("timeout", 120)
     verify_ssl = api_config.get("verify_ssl", True)
-    max_records = api_config.get("max_records", 100000)  # 最大记录数限制
+    max_records = api_config.get("max_records", 100000)
 
-    # 直接使用headers，不再解密
-    decrypted_headers = headers
-
-    logger.info(f"正在从API获取数据: {url} ({api_name})")
+    logger.info(f"正在从API获取数据: {url} ({api_name}), 最大记录数: {max_records}")
 
     try:
-        logger.info(f"开始请求API数据，最大记录数限制: {max_records}")
-        
-        # 直接请求完整数据（不分页API）
-        response = requests.post(
-            url,
-            headers=decrypted_headers,
-            timeout=timeout,
-            verify=verify_ssl
-        )
-        response.raise_for_status()
+        with requests.post(url, headers=headers, timeout=timeout, verify=verify_ssl, stream=True) as response:
+            response.raise_for_status()
+            
+            # 动态查找数据记录迭代器
+            records_iter = None
+            # ijson.kvitems可以流式读取顶层键值对
+            for key, value in ijson.kvitems(response.raw, ''):
+                if key == 'success' and not value:
+                    # 提前处理API业务错误
+                    msg = next((v for k, v in ijson.kvitems(response.raw, '') if k == 'message'), '未知错误')
+                    logger.error(f"API返回错误: {msg}")
+                    return None
+                # 假设数据在名为 'value' 或 'data' 的列表或对象中
+                if key in ('value', 'data'):
+                    # 如果value是对象，继续查找'records'
+                    if isinstance(value, dict):
+                        records_iter = ijson.items(ijson.items(response.raw, key), 'records.item')
+                    else:
+                        records_iter = ijson.items(response.raw, f'{key}.item')
+                    break # 找到数据就跳出
 
-        response_data = response.json()
-        if not response_data.get('success') or 'value' not in response_data:
-            logger.error(f"API返回数据格式不正确: {api_name}")
-            return None
-
-        # 获取数据记录
-        records = response_data['value']
-        
-        # 如果不是列表格式，尝试转换
-        if not isinstance(records, list):
-            if isinstance(records, dict) and 'records' in records:
-                records = records['records']
-            else:
-                logger.error(f"API返回的数据不是列表格式: {api_name}")
+            if records_iter is None:
+                 # 如果没有找到 'value' 或 'data'，尝试默认路径
+                logger.warning("未在顶层找到 'value' 或 'data' 键, 尝试 'value.item' 作为默认路径")
+                # 重置流位置是不现实的，因此需要重新请求或有更好的API设计
+                # 这里我们假设API结构是固定的，如果找不到就失败
+                # 为了简化，我们直接认为这种情况无法处理
+                logger.error("无法确定API响应中的数据路径")
                 return None
-        
-        total_records = len(records)
-        logger.info(f"API返回数据: {total_records} 条记录")
-        
-        # 检查是否超过最大记录数限制
-        if total_records > max_records:
-            logger.warning(f"数据量({total_records})超过限制({max_records})，将截取前{max_records}条")
-            records = records[:max_records]
-            total_records = max_records
-        
-        # 如果数据量很大，采用流式处理
-        if total_records > 50000:
-            return _process_large_dataset(records, task_config, api_name)
-        else:
-            # 小数据量直接处理
-            return _process_small_dataset(records, task_config, api_name)
-        
+
+            return _process_stream_dataset(records_iter, task_config, api_name, max_records)
+
     except requests.exceptions.RequestException as e:
         logger.error(f"API请求失败: {api_name} - {e}")
-        return None
     except Exception as e:
         logger.error(f"数据处理失败: {api_name} - {e}")
-        return None
+    
+    return None
 
-def _process_large_dataset(records: List, task_config: Dict, api_name: str) -> Optional[pd.DataFrame]:
-    """处理大数据集 - 流式构建DataFrame"""
-    logger.info(f"大数据集检测: {len(records)} 条记录，启用流式处理")
+
+def _process_stream_dataset(records_iter, task_config: Dict, api_name: str, max_records: int) -> Optional[pd.DataFrame]:
+    """处理流式数据集 - 分批构建DataFrame"""
+    logger.info(f"开始流式处理数据: {api_name}")
     
     try:
-        # 分批构建DataFrame以减少内存峰值
-        batch_size = 10000  # 每批10000条
+        batch_size = 10000
         dataframes = []
+        current_batch = []
+        total_count = 0
+
+        for record in records_iter:
+            current_batch.append(record)
+            total_count += 1
+
+            if len(current_batch) >= batch_size:
+                dataframes.append(pd.DataFrame(current_batch))
+                current_batch = []
+                logger.info(f"已处理数据: {total_count} 条")
+
+            if total_count >= max_records:
+                logger.warning(f"达到最大记录数限制 ({max_records})，停止读取")
+                break
         
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
-            batch_df = pd.DataFrame(batch)
-            dataframes.append(batch_df)
+        if current_batch:
+            dataframes.append(pd.DataFrame(current_batch))
+            logger.info(f"处理剩余数据，总计: {total_count} 条")
             
-            current_count = min(i + batch_size, len(records))
-            progress = (current_count / len(records)) * 100
-            logger.info(f"流式处理进度: {progress:.1f}% ({current_count}/{len(records)})")
-            
-            # 立即清理内存
-            del batch
-            if i % batch_size == 0:
-                import gc
-                gc.collect()
-        
-        # 合并所有批次
+        if not dataframes:
+            logger.warning(f"未获取到任何数据: {api_name}")
+            return pd.DataFrame() # 返回空的DataFrame而不是None
+
         logger.info("开始合并数据批次...")
         final_df = pd.concat(dataframes, ignore_index=True)
-        
-        # 清理临时DataFrame
-        del dataframes
-        import gc
-        gc.collect()
         
         return _finalize_dataframe(final_df, task_config, api_name)
         
     except Exception as e:
-        logger.error(f"大数据集处理失败: {api_name} - {e}")
+        logger.error(f"流式数据集处理失败: {api_name} - {e}")
         return None
 
 def _process_small_dataset(records: List, task_config: Dict, api_name: str) -> Optional[pd.DataFrame]:

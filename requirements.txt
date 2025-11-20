@@ -5,6 +5,7 @@
 requests>=2.25.0          # 降低版本要求，提升兼容性
 pandas>=1.3.0             # 降低版本要求
 openpyxl>=3.0.0
+ijson>=3.1.4              #用于流式解析JSON，降低内存占用
 
 # 加密依赖
 cryptography>=3.3.0       # 降低版本要求
