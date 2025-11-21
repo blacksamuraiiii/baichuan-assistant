@@ -64,15 +64,28 @@ LOG_FILE = EXTERNAL_DIR / "app.log"
 # ==================== 日志配置 ====================
 def setup_logging():
     """配置日志系统"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s | %(levelname)s | %(message)s',
-        handlers=[
-            logging.FileHandler(LOG_FILE, encoding='utf-8'),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
-    return logging.getLogger(__name__)
+    try:
+        # 确保日志目录存在
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s | %(levelname)s | %(message)s',
+            handlers=[
+                logging.FileHandler(LOG_FILE, encoding='utf-8'),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
+        return logging.getLogger(__name__)
+    except Exception as e:
+        # 如果文件日志失败，只使用控制台日志
+        print(f"警告: 文件日志配置失败: {e}")
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s | %(levelname)s | %(message)s',
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
+        return logging.getLogger(__name__)
 
 logger = setup_logging()
 # 设置utils模块的logger
@@ -1482,47 +1495,121 @@ def main():
 
     args = parser.parse_args()
 
+    # 确保日志目录存在
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"警告: 无法创建日志目录: {e}")
+
     # 如果是headless模式，重新配置日志，只输出到文件
     if args.headless:
-        for handler in logger.handlers[:]:
-            logger.removeHandler(handler)
-        logger.addHandler(logging.FileHandler(LOG_FILE, encoding='utf-8'))
+        try:
+            for handler in logger.handlers[:]:
+                logger.removeHandler(handler)
+            logger.addHandler(logging.FileHandler(LOG_FILE, encoding='utf-8'))
+        except Exception as e:
+            print(f"警告: Headless模式日志重配置失败: {e}")
 
     # 检查是否需要生成默认配置
     if not CONFIG_FILE.exists():
-        logger.info("首次运行，生成默认配置")
-        save_config(DEFAULT_CONFIG_TEMPLATE)
+        try:
+            logger.info("首次运行，生成默认配置")
+            save_config(DEFAULT_CONFIG_TEMPLATE)
+            logger.info("默认配置生成成功")
+        except Exception as e:
+            logger.error(f"生成默认配置失败: {e}")
+            print(f"错误: 无法生成默认配置文件: {e}")
+            return 1
 
         # 如果没有命令行参数，显示首次运行配置向导
         if not any([args.headless, args.test_task, args.list_tasks, args.register_task, args.unregister_task]):
             if args.first_time_setup:
-                show_first_time_setup()
+                try:
+                    show_first_time_setup()
+                except Exception as e:
+                    logger.error(f"显示首次运行配置向导失败: {e}")
 
     if args.headless:
         # Headless模式
-        return run_headless(args.headless)
+        try:
+            logger.info(f"Headless模式启动，执行任务: {args.headless}")
+            result = run_headless(args.headless)
+            logger.info(f"Headless任务 {args.headless} 完成，返回码: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Headless任务执行失败: {e}")
+            print(f"错误: Headless任务执行失败: {e}")
+            return 1
     elif args.test_task:
         # 测试任务
-        success = execute_task(args.test_task)
-        return 0 if success else 1
+        try:
+            logger.info(f"测试任务: {args.test_task}")
+            success = execute_task(args.test_task)
+            if success:
+                logger.info(f"任务 '{args.test_task}' 测试成功")
+                return 0
+            else:
+                logger.error(f"任务 '{args.test_task}' 测试失败")
+                return 1
+        except Exception as e:
+            logger.error(f"任务测试失败: {args.test_task} - {e}")
+            print(f"错误: 任务测试失败: {e}")
+            return 1
     elif args.list_tasks:
         # 列出任务
-        config = load_config()
-        tasks = config.get("tasks", [])
-        print("当前配置的任务:")
-        for task in tasks:
-            print(f"  - {task['name']}")
-        return 0
+        try:
+            config = load_config()
+            tasks = config.get("tasks", [])
+            print("当前配置的任务:")
+            for task in tasks:
+                print(f"  - {task['name']}")
+            logger.info(f"列出任务成功，共 {len(tasks)} 个任务")
+            return 0
+        except Exception as e:
+            logger.error(f"列出任务失败: {e}")
+            print(f"错误: 无法列出任务: {e}")
+            return 1
     elif args.register_task:
         # 注册定时任务
-        return 0 if register_scheduled_task(args.register_task) else 1
+        try:
+            logger.info(f"注册定时任务: {args.register_task}")
+            success = register_scheduled_task(args.register_task)
+            if success:
+                logger.info(f"定时任务 '{args.register_task}' 注册成功")
+                return 0
+            else:
+                logger.error(f"定时任务 '{args.register_task}' 注册失败")
+                return 1
+        except Exception as e:
+            logger.error(f"注册定时任务失败: {args.register_task} - {e}")
+            print(f"错误: 注册定时任务失败: {e}")
+            return 1
     elif args.unregister_task:
         # 注销定时任务
-        return 0 if unregister_scheduled_task(args.unregister_task) else 1
+        try:
+            logger.info(f"注销定时任务: {args.unregister_task}")
+            success = unregister_scheduled_task(args.unregister_task)
+            if success:
+                logger.info(f"定时任务 '{args.unregister_task}' 注销成功")
+                return 0
+            else:
+                logger.error(f"定时任务 '{args.unregister_task}' 注销失败")
+                return 1
+        except Exception as e:
+            logger.error(f"注销定时任务失败: {args.unregister_task} - {e}")
+            print(f"错误: 注销定时任务失败: {e}")
+            return 1
     elif args.first_time_setup:
         # 显示首次运行配置向导
-        show_first_time_setup()
-        return 0
+        try:
+            logger.info("显示首次运行配置向导")
+            show_first_time_setup()
+            logger.info("首次运行配置向导显示完成")
+            return 0
+        except Exception as e:
+            logger.error(f"显示首次运行配置向导失败: {e}")
+            print(f"错误: 显示首次运行配置向导失败: {e}")
+            return 1
     else:
         # GUI模式
         if GUI_AVAILABLE:
@@ -1539,5 +1626,36 @@ def main():
             print("  --first-time-setup      : 显示首次运行配置向导")
         return 0
 
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    """全局异常处理器"""
+    if issubclass(exc_type, KeyboardInterrupt):
+        # 允许键盘中断（Ctrl+C）
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    
+    # 记录异常信息
+    logger.error("未捕获的异常", exc_info=(exc_type, exc_value, exc_traceback))
+    print(f"\n程序发生未预期的错误: {exc_value}")
+    print("请查看日志文件获取详细信息: app.log")
+    print("您可以尝试以下操作:")
+    print("1. 检查配置文件是否正确")
+    print("2. 确保网络连接正常")
+    print("3. 验证API凭据是否有效")
+    print("4. 联系技术支持")
+
 if __name__ == "__main__":
-    sys.exit(main())
+    # 设置全局异常处理器
+    sys.excepthook = global_exception_handler
+    
+    try:
+        exit_code = main()
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        print("\n程序被用户中断")
+        logger.info("程序被用户中断")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"程序主函数执行失败: {e}", exc_info=True)
+        print(f"\n程序执行失败: {e}")
+        print("请查看日志文件获取详细信息")
+        sys.exit(1)
